@@ -556,12 +556,15 @@ int main()
 
 
     CUDA_CHECK(cudaMemcpy(
-        d_A,h_A,size_A,
+        d_A,
+        h_A,size_A,
         cudaMemcpyHostToDevice));
 
 
     CUDA_CHECK(cudaMemcpy(
-        d_B,h_B,size_B,
+        d_B,
+        h_B,
+        size_B,
         cudaMemcpyHostToDevice));
 
 
@@ -588,10 +591,18 @@ int main()
     // warmup
 
     warp_thread_tiling_gemm<
-        BM,BN,BK,TM,TN>
+        BM,
+        BN,
+        BK,
+        TM,
+        TN>
     <<<grid,block>>>(
-        d_A,d_B,d_C,
-        M,N,K);
+        d_A,
+        d_B,
+        d_C,
+        M,
+        N,
+        K);
 
 
 
@@ -622,10 +633,21 @@ int main()
 
 
         warp_thread_tiling_gemm<
-            BM,BN,BK,TM,TN>
+            BM,
+            BN,
+            BK,
+            TM,
+            TN>
         <<<grid,block>>>(
-            d_A,d_B,d_C,
-            M,N,K);
+            d_A,
+            d_B,
+            d_C,
+            M,
+            N,
+            K);
+
+
+        CUDA_CHECK(cudaGetLastError());
 
 
         cudaEventRecord(stop);
@@ -663,6 +685,12 @@ int main()
 
 
 
+    printf("============================\n");
+    printf("Matrix : %d x %d x %d\n",
+           M,
+           N,
+           K);
+
     printf(
         "Time : %.3f ms\n",
         avg_ms);
@@ -672,7 +700,7 @@ int main()
         "GFLOPS : %.2f\n",
         gflops);
 
-
+  printf("============================\n");
 
 
     CUDA_CHECK(cudaMemcpy(
