@@ -73,7 +73,7 @@ template <
     int TM,
     int TN
 >
-__global__ void warp_thread_tiling_gemm(
+__global__ void float4_gemm(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
@@ -696,7 +696,7 @@ int main()
 
 
     printf(
-        "Warp Thread Tiling GEMM\n");
+        "Float4 GEMM\n");
 
     printf(
         "BM=%d BN=%d BK=%d TM=%d TN=%d\n",
@@ -706,7 +706,7 @@ int main()
 
     // warmup
 
-    warp_thread_tiling_gemm<
+    float4_gemm<
         BM,
         BN,
         BK,
@@ -748,7 +748,7 @@ int main()
         cudaEventRecord(start);
 
 
-        warp_thread_tiling_gemm<
+        float4_gemm<
             BM,
             BN,
             BK,
