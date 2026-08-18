@@ -39,7 +39,135 @@ __device__ inline float4 load_float4(const T* ptr)
     return *reinterpret_cast<const float4*>(ptr);
 }
 
+template<int BM,int BN,int BK>
+__device__ void load_tile_float4(
+    const float* A,
+    const float* B,
+    float As[BM][BK+4],
+    float Bs[BK][BN],
+    int block_row,
+    int block_col,
+    int k0,
+    int M,
+    int N,
+    int K)
+{
 
+    int tid=threadIdx.x;
+
+
+
+    // ==========================
+    // Load A float4
+    // ==========================
+
+    for(int idx=tid*4;
+        idx<BM*BK;
+        idx+=blockDim.x*4)
+    {
+
+        int row=idx/BK;
+
+        int col=idx%BK;
+
+
+        int gr=
+            block_row+row;
+
+        int gc=
+            k0+col;
+
+        int sw =
+                (row&3)<<2;
+
+        if(gr<M && gc+3<K)
+        {
+            
+            float4 v=
+                load_float4(
+                    &A[gr*K+gc]
+                );
+
+
+
+            As[row][(col+0)^sw]=v.x;
+            As[row][(col+1)^sw]=v.y;
+            As[row][(col+2)^sw]=v.z;
+            As[row][(col+3)^sw]=v.w;
+
+        }
+        else
+        {
+            for(int t=0;t<4;t++)
+            {
+                if(gr<M && gc+t<K)
+                    As[row][(col+t)^sw]
+                        = A[gr*K+gc+t];
+                else
+                    As[row][(col+t)^sw]=0;
+            }
+        }
+        
+    }
+
+
+
+
+
+    // ==========================
+    // Load B float4
+    // ==========================
+
+    for(int idx=tid*4;
+        idx<BK*BN;
+        idx+=blockDim.x*4)
+    {
+
+        int row=
+            idx/BN;
+
+
+        int col=
+            idx%BN;
+
+
+
+        int gr=
+            k0+row;
+
+
+        int gc=
+            block_col+col;
+
+
+
+        if(gr<K && gc+3<N)
+        {
+
+            float4 v=
+                load_float4(
+                    &B[gr*N+gc]
+                );
+
+
+            Bs[row][col+0]=v.x;
+            Bs[row][col+1]=v.y;
+            Bs[row][col+2]=v.z;
+            Bs[row][col+3]=v.w;
+
+        }
+        else {
+    for(int t=0; t<4; t++) {
+        if(gr<K && gc+t<N)
+            Bs[row][col+t] = B[gr*N+gc+t];
+        else
+            Bs[row][col+t] = 0;
+    }
+}
+
+    }
+
+}
 
 // ============================================================
 // Warp-level Thread Tiling SGEMM
@@ -73,7 +201,7 @@ template <
     int TM,
     int TN
 >
-__global__ void float4_gemm(
+__global__ void double_buffer_gemm(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
@@ -97,9 +225,9 @@ __global__ void float4_gemm(
     constexpr int SWIZZLE = 4;
 
 
-    __shared__ float As[BM][BK + SWIZZLE];
+    __shared__ float As[2][BM][BK + SWIZZLE];
 
-    __shared__ float Bs[BK][BN];
+    __shared__ float Bs[2][BK][BN];
 
 
 
@@ -108,7 +236,6 @@ __global__ void float4_gemm(
     // ========================================================
     const int tid =
         threadIdx.x;
-
 
     const int warp_id =
         tid >> 5;
@@ -209,264 +336,153 @@ __global__ void float4_gemm(
 
     const int block_col =
         blockIdx.x * BN;
+    // ========================================================
+    // Double Buffer
+    // ========================================================
+
+    int buf=0;
+
+
+    // --------------------------
+    // Prologue
+    // 加载第一个 tile
+    // --------------------------
+
+    load_tile_float4<BM,BN,BK>(
+        A,
+        B,
+        As[0],
+        Bs[0],
+        block_row,
+        block_col,
+        0,
+        M,
+        N,
+        K
+    );
+
+
+    __syncthreads();
+
 
 
 
     // ========================================================
-    // K Loop
+    // Main loop
     // ========================================================
-    for(int k0 = 0;
-        k0 < K;
-        k0 += BK)
+
+
+    for(int k0=0;
+        k0<K;
+        k0+=BK)
     {
 
+        // --------------------------------
+        // 当前 tile compute
+        // --------------------------------
 
-        // ----------------------------------------------------
-        // Load A Tile
-        // ----------------------------------------------------
-
-        // ========================================================
-        // Vectorized Load A
-        //
-        // Global Memory:
-        // 连续读取 float4
-        //
-        // Shared Memory:
-        // swizzle 存储
-        //
-        // ========================================================
-
-
-        for(int idx = tid * 4;
-            idx < BM * BK;
-            idx += blockDim.x * 4)
-        {
-
-            int row =
-                idx / BK;
-
-
-            int col =
-                idx % BK;
-
-
-
-            // 保证 float4 对齐
-            assert(col % 4 == 0);
-
-
-
-            int global_row =
-                block_row + row;
-
-
-            int global_col =
-                k0 + col;
-
-
-
-            if(global_row < M &&
-            global_col + 3 < K)
-            {
-
-                float4 value =
-                    load_float4(
-                        &A[global_row*K + global_col]
-                    );
-
-
-                // swizzle 写入
-
-                As[row][(col+0)^((row&3)<<2)] =
-                    value.x;
-
-
-                As[row][(col+1)^((row&3)<<2)] =
-                    value.y;
-
-
-                As[row][(col+2)^((row&3)<<2)] =
-                    value.z;
-
-
-                As[row][(col+3)^((row&3)<<2)] =
-                    value.w;
-
-            }
-            else
-            {
-
-                for(int i=0;i<4;i++)
-                {
-
-                    if(global_row<M &&
-                    global_col+i<K)
-                    {
-                        As[row][
-                            (col+i)^((row&3)<<2)
-                        ] =
-                            A[global_row*K+
-                            global_col+i];
-                    }
-                    else
-                    {
-                        As[row][
-                            (col+i)^((row&3)<<2)
-                        ]=0.0f;
-                    }
-                }
-            }
-        }
-
-
-
-        // ----------------------------------------------------
-        // Load B Tile
-        // ----------------------------------------------------
-
-        for(int idx = tid*4;
-        idx < BK*BN;
-        idx += blockDim.x*4)
-    {
-
-        int row =
-            idx / BN;
-
-
-        int col =
-            idx % BN;
-
-
-        int global_row =
-            k0+row;
-
-
-        int global_col =
-            block_col+col;
-
-
-
-        if(global_row<K &&
-        global_col+3<N)
-        {
-
-            float4 value =
-                load_float4(
-                    &B[global_row*N+
-                    global_col]
-                );
-
-
-            Bs[row][col+0]=value.x;
-
-            Bs[row][col+1]=value.y;
-
-            Bs[row][col+2]=value.z;
-
-            Bs[row][col+3]=value.w;
-
-        }
-    }
-
-
-
-        __syncthreads();
-
-
-
-
-        // ====================================================
-        // Compute
-        //
-        // Shared Memory
-        //        |
-        //        v
-        // Register
-        //
-        // Outer Product
-        //
-        // ====================================================
 
         #pragma unroll
-        for(int k = 0;
-            k < BK;
-            k++)
+        for(int k=0;k<BK;k++)
         {
 
 
             #pragma unroll
-            for(int i=0;
-                i<TM;
-                i++)
+            for(int i=0;i<TM;i++)
             {
-                // ========================================================
-                // Shared Memory Read
-                //
-                // 使用相同 swizzle 规则反解
-                // ========================================================
+
 
                 int smem_row =
                     thread_row+i;
 
 
                 int smem_col =
-                    k ^ ((smem_row & 3)<<2);
+                    k ^ ((smem_row&3)<<2);
 
 
 
-                reg_a[i] =
-                    As[
-                    smem_row
-                    ][
-                    smem_col
-                    ];
+                reg_a[i]=
+                    As[buf]
+                    [smem_row]
+                    [smem_col];
+
             }
 
 
 
             #pragma unroll
-            for(int j=0;
-                j<TN;
-                j++)
+            for(int j=0;j<TN;j++)
             {
-                reg_b[j] =
-                    Bs[k]
-                    [
-                        thread_col+j
-                    ];
+
+                reg_b[j]=
+                    Bs[buf]
+                    [k]
+                    [thread_col+j];
+
             }
 
 
 
-
             #pragma unroll
-            for(int i=0;
-                i<TM;
-                i++)
+            for(int i=0;i<TM;i++)
             {
 
                 #pragma unroll
-                for(int j=0;
-                    j<TN;
-                    j++)
+                for(int j=0;j<TN;j++)
                 {
 
-                    reg_c[i][j] +=
-                        reg_a[i] *
-                        reg_b[j];
+                    reg_c[i][j]
+                        +=
+                    reg_a[i]
+                    *
+                    reg_b[j];
 
                 }
+
             }
 
         }
 
+        int next_buf =
+            1-buf;
+
+
+
+        // --------------------------------
+        // 预取下一 tile
+        // --------------------------------
+
+        if(k0+BK<K)
+        {
+
+            load_tile_float4<BM,BN,BK>(
+                A,
+                B,
+                As[next_buf],
+                Bs[next_buf],
+                block_row,
+                block_col,
+                k0+BK,
+                M,
+                N,
+                K
+            );
+            
+
+        }
+
+
+
+        // 等待下一 tile
+
 
         __syncthreads();
 
+
+
+        buf=next_buf;
+
     }
-
-
-
 
     // ========================================================
     // Store C
@@ -506,13 +522,8 @@ __global__ void float4_gemm(
 
         }
     }
-
+        
 }
-
-
-
-
-
 
 // ============================================================
 // Matrix Initialize
@@ -527,7 +538,6 @@ void fill_random(float* data,int size)
             RAND_MAX;
     }
 }
-
 
 
 
@@ -615,7 +625,7 @@ int main()
 
     constexpr int BM=128;
     constexpr int BN=128;
-    constexpr int BK=32;
+    constexpr int BK=16; //我的SM只有48KB，正常BK选择32就行
 
 
     constexpr int TM=8;
@@ -706,7 +716,7 @@ int main()
 
     // warmup
 
-    float4_gemm<
+    double_buffer_gemm<
         BM,
         BN,
         BK,
@@ -748,7 +758,7 @@ int main()
         cudaEventRecord(start);
 
 
-        float4_gemm<
+        double_buffer_gemm<
             BM,
             BN,
             BK,
