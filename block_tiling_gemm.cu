@@ -339,9 +339,9 @@ int main()
     // -------------------------------
     // Kernel configuration
     // -------------------------------
-    constexpr int BM = 128;
-    constexpr int BN = 128;
-    constexpr int BK = 8;
+    constexpr int BM = 64;
+    constexpr int BN = 64;
+    constexpr int BK = 32;
 
 
     constexpr int BLOCK_SIZE = 256;
