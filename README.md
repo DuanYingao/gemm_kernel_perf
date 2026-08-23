@@ -101,7 +101,7 @@ Block tiling is a major improvement, but the profile also shows room for another
 | 50% achieved occupancy | Latency-hiding capacity is constrained | Balance register use, shared-memory footprint, and block shape |
 | 0.68 eligible warps per scheduler on average | Schedulers often lack a ready warp | Increase useful parallelism or reduce dependency/latency chains |
 | 50% tail effect | 64 blocks do not fill the final execution wave on 30 SMs | Adjust grid decomposition or workload size when applicable |
-| 49.61% compute throughput | The kernel is no longer primarily DRAM-bound, but it is not compute-saturated | Consider vectorized/coalesced loads, warp-level tiling, and architecture-specific tuning |
+| 59.49% compute throughput | The kernel is no longer primarily DRAM-bound, but it is not compute-saturated | Consider vectorized/coalesced loads, warp-level tiling, and architecture-specific tuning |
 
 Practical next experiments include:
 
