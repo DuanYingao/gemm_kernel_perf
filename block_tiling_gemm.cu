@@ -57,7 +57,7 @@ __global__ void block_tiling_gemm(
     const int N)
 {
     // Shared Memory Tile
-    __shared__ float As[BM][BK];
+    __shared__ float As[BM][BK]; 
     __shared__ float Bs[BK][BN];
 
 
@@ -82,7 +82,7 @@ __global__ void block_tiling_gemm(
     // 32 x 8 threads
     //
     // C compute:
-    // 16 x 16 threads
+    // 4 x 4 threads
     //
     // 每个 thread:
     // 计算 8 x 8 输出元素
@@ -110,7 +110,7 @@ __global__ void block_tiling_gemm(
 
 
     // -------- Compute C mapping --------
-    constexpr int C_THREAD_X = 16;
+    constexpr int C_THREAD_X = 32;
     constexpr int C_THREAD_Y = BLOCK_SIZE / C_THREAD_X;
 
 
