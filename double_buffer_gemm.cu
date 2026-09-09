@@ -22,9 +22,11 @@
     } while (0)
 
 
+#define FLOAT4(ptr) (reinterpret_cast<float4*>(&(ptr))[0])
+
 
 // ============================================================
-// Block Tiling GEMM Kernel
+// Float4 Tiling GEMM Kernel
 //
 // 使用:
 // 1. Shared Memory 缓存 A/B tile
@@ -48,18 +50,100 @@ template <
     int BK,
     int BLOCK_SIZE
 >
-__global__ void block_tiling_gemm(
-    const float* __restrict__ A,
-    const float* __restrict__ B,
+__device__ void load_global_to_shared(
+    float* __restrict__ A,
+    float* __restrict__ B,
+    float (&As)[BK][BM],
+    float (&Bs)[BK][BN],
+    int M, int N, int K, int k0)
+{
+        // -------- Load A tile mapping --------
+        // 为了让float4能案列读取读tileA，对As进行转置
+        // constexpr int A_LOAD_Y = BLOCK_SIZE / A_LOAD_X;
+        constexpr int A_LOAD_Y = BLOCK_SIZE >> 3;
+
+
+        // const int a_thread_x = threadIdx.x % A_LOAD_X;
+        // const int a_thread_y = threadIdx.x / A_LOAD_X;
+        const int a_thread_x = threadIdx.x & 7;
+        const int a_thread_y = threadIdx.x >> 3;
+
+
+
+        // -------- Load B tile mapping --------
+        // constexpr int B_LOAD_X = 16;
+        // constexpr int B_LOAD_Y = BLOCK_SIZE / B_LOAD_X;
+        constexpr int B_LOAD_Y = BLOCK_SIZE >> 4;
+
+        // const int b_thread_x = threadIdx.x % B_LOAD_X;
+        // const int b_thread_y = threadIdx.x / B_LOAD_X;
+        const int b_thread_x = threadIdx.x & 15;
+        const int b_thread_y = threadIdx.x >> 4;
+
+
+        int a_j = a_thread_x * 4;
+        
+        for (int i = a_thread_y;
+             i < BM;
+             i += A_LOAD_Y)
+        {
+            const int row = blockIdx.y * BM + i;
+            const int col = k0 + a_j;
+
+
+            float4 a_val = FLOAT4(A[row * K + col]);
+
+            As[a_j + 0][i] = a_val.x;
+
+            As[a_j + 1][i] = a_val.y;
+
+            As[a_j + 2][i] = a_val.z;
+
+            As[a_j + 3][i] = a_val.w;
+        }
+
+        int b_j = b_thread_x * 4;
+
+        for (int i = b_thread_y;
+             i < BK;
+             i += B_LOAD_Y)
+        {
+        
+            const int row = k0 + i;
+            const int col = blockIdx.x * BN + b_j;
+
+            float4 b_val = FLOAT4(B[row * N + col]);
+
+            Bs[i][b_j + 0] = b_val.x;
+
+            Bs[i][b_j + 1] = b_val.y;
+
+            Bs[i][b_j + 2] = b_val.z;
+
+            Bs[i][b_j + 3] = b_val.w;
+            
+        }
+}
+
+
+template <
+    int BM,
+    int BN,
+    int BK,
+    int BLOCK_SIZE
+>
+__global__ void double_buffer_gemm(
+    float* __restrict__ A,
+    float* __restrict__ B,
     float* __restrict__ C,
     const int M,
-    const int K,
-    const int N)
+    const int N,
+    const int K)
 {
     // Shared Memory Tile
-    __shared__ float As[BM][BK]; 
-    __shared__ float Bs[BK][BN];
-
+    // 为了让float4能案列读取读tileA，对As进行转置
+    __shared__ float As[2][BK][BM]; 
+    __shared__ float Bs[2][BK][BN];
 
     // ========================================================
     // Thread mapping
@@ -67,10 +151,10 @@ __global__ void block_tiling_gemm(
     // 一个 block 256 threads
     //
     // A tile loading:
-    // 16 x 16 threads
+    // 32 x 8 threads
     //
     // B tile loading:
-    // 16 x 16 threads
+    // 8 x 32 threads
     //
     // C compute:
     // 16 x 16 threads
@@ -80,55 +164,49 @@ __global__ void block_tiling_gemm(
     // ========================================================
 
 
-    // -------- Load A tile mapping --------
-    constexpr int A_LOAD_X = 32;
-    constexpr int A_LOAD_Y = BLOCK_SIZE / A_LOAD_X;
-
-
-    const int a_thread_x = threadIdx.x % A_LOAD_X;
-    const int a_thread_y = threadIdx.x / A_LOAD_X;
-
-
-
-    // -------- Load B tile mapping --------
-    constexpr int B_LOAD_X = 32;
-    constexpr int B_LOAD_Y = BLOCK_SIZE / B_LOAD_X;
-
-
-    const int b_thread_x = threadIdx.x % B_LOAD_X;
-    const int b_thread_y = threadIdx.x / B_LOAD_X;
-
-
-
     // -------- Compute C mapping --------
-    constexpr int C_THREAD_X = 16;
-    constexpr int C_THREAD_Y = BLOCK_SIZE / C_THREAD_X;
+    // constexpr int C_THREAD_X = 16;
+    // constexpr int C_THREAD_Y = BLOCK_SIZE / C_THREAD_X;
+    // constexpr int C_THREAD_Y = BLOCK_SIZE >> 4;
 
 
-    const int c_thread_x = threadIdx.x % C_THREAD_X;
-    const int c_thread_y = threadIdx.x / 16 % C_THREAD_Y;
+    // const int c_thread_x = threadIdx.x % C_THREAD_X;
+    // const int c_thread_y = threadIdx.x / C_THREAD_X;
+    const int c_thread_x = threadIdx.x & 15;
+    const int c_thread_y = threadIdx.x >> 4;
 
 
 
     // 每个线程负责的输出 tile
-    constexpr int TM = BM / C_THREAD_Y;
-    constexpr int TN = BN / C_THREAD_X;
+    // constexpr int TM = BM / C_THREAD_Y;
+    // constexpr int TN = BN / C_THREAD_X;
+    constexpr int TM = BM >> 4;
+    constexpr int TN = BN >> 4;
 
 
 
     // Register tile
+    float4 a_frag_vec[2], b_frag_vec[2];
     float c_register[TM][TN] = {0.0f};
 
-    // ========================================================
-    // 运算过程
-    // 1.先分块,一个block负责一个C矩阵的BMxBN大小的块，一共有1024 / BM * 1024 / BN 个block，也就是Grid里的block数量，这些block并行计算，用syncthreads()同步最终结果
-    // 2.一个block沿k方向循环加载A和B的tile，并进行矩阵乘法计算
-    // 3.由于一个block只有256个线程，无法直接用所有线程同时计算整个BMxBN的块，因此需要将BMxBN的块用for循环分解
-    // 4.最外圈循环按BK的k一个个走，循环中A按一列读，B按一行读，先从N方向循环，一次循环读出256个元素，循环TN次，再从M方向下降c_thread_x的距离，再进行一次TN个行循环，重复TM次
-    //
-    // 
-    // ========================================================
+    int buf_idx = 0;
+    load_global_to_shared<
+        BM,
+        BN,
+        BK,
+        BLOCK_SIZE>
+        (A, B, As[0], Bs[0], M, N, K, 0);
+    __syncthreads();
 
+    // 加载数据到寄存器
+    // const int row = c_thread_y * 4;
+    
+    a_frag_vec[0] = FLOAT4(As[0][0][c_thread_y * 4]);
+    
+
+    // const int col = c_thread_x * 4;
+    
+    b_frag_vec[0] = FLOAT4(Bs[0][0][c_thread_x * 4]);
     // ========================================================
     // K 方向循环
     // ========================================================
@@ -136,85 +214,88 @@ __global__ void block_tiling_gemm(
     {
 
         // ----------------------------------------------------
-        // 存入 A tile
+        // 先存global到shared，再存shared到寄存器
+        // 一个k，存下一个k的数据到寄存器，再计算当前k，一个循环一存一算，循环完BK后，写回C
+        // 如果是第一个k，直接存下一个buffer的global到shared
         // ----------------------------------------------------
-        for (int i = a_thread_y;
-             i < BM;
-             i += A_LOAD_Y)
-        {
-            const int row = blockIdx.y * BM + i;
-            const int col = k0 + a_thread_x;
+        int next_buf = 1 - buf_idx;
 
 
-            As[i][a_thread_x] =
-                (row < M && col < K)
-                    ? A[row * K + col]
-                    : 0.0f;
-        }
-
-
-
-        // ----------------------------------------------------
-        // 存入 B tile
-        // ----------------------------------------------------
-        for (int i = b_thread_y;
-             i < BK;
-             i += B_LOAD_Y)
-        {
-            for(int j = b_thread_x;
-                j < BN;
-                j += B_LOAD_X)
-            {
-                const int row = k0 + i;
-                const int col = blockIdx.x * BN + j;
-
-                Bs[i][j] =
-                    (row < K && col < N)
-                        ? B[row * N + col]
-                        : 0.0f;
-            }
-
-        }
-
-
-
-        __syncthreads();
-
-
-
-        // ----------------------------------------------------
-        // Compute:
-        //
-        // C += A_tile × B_tile
-        //
-        // 使用 register 累积结果
-        // ----------------------------------------------------
-        // #pragma unroll 展开加速，但寄存器代价大
         for (int k = 0; k < BK; ++k)
         {
-            for (int i = 0; i < TM; ++i)
-            {
-                const int row =
-                    c_thread_y +
-                    i * C_THREAD_Y;
+            
 
+            if (k + 1 < BK) {
+            
+            a_frag_vec[1 - k % 2] = FLOAT4(As[buf_idx][k + 1][c_thread_y * 4]);
+            
+            b_frag_vec[1 - k % 2] = FLOAT4(Bs[buf_idx][k + 1][c_thread_x * 4]);
 
-                for (int j = 0; j < TN; ++j)
-                {
-                    const int col =
-                        c_thread_x +
-                        j * C_THREAD_X;
-
-                    // 读取AS时，一列32个全是lane0，全conflict
-                    c_register[i][j] +=
-                        As[row][k] * 
-                        Bs[k][col];
-                }
             }
+
+            // 在第一个 k 步时，发射下一 tile 的 Global Memory 加载
+            if (k == 0 && k0 < K) {
+                load_global_to_shared<
+        BM,
+        BN,
+        BK,
+        BLOCK_SIZE>
+        (A, B, As[next_buf], Bs[next_buf], M, N, K, k0 + BK);
+            }
+
+
+            // c_register变为4*4的连续区域，而不是跨块分布的16个独立数据
+
+            // 第一行
+            c_register[0][0] += a_frag_vec[k % 2].x * b_frag_vec[k % 2].x;
+
+            c_register[0][1] += a_frag_vec[k % 2].x * b_frag_vec[k % 2].y;
+
+            c_register[0][2] += a_frag_vec[k % 2].x * b_frag_vec[k % 2].z;
+
+            c_register[0][3] += a_frag_vec[k % 2].x * b_frag_vec[k % 2].w;
+
+            // 第二行
+            
+            c_register[1][0] += a_frag_vec[k % 2].y * b_frag_vec[k % 2].x;
+
+            c_register[1][1] += a_frag_vec[k % 2].y * b_frag_vec[k % 2].y;
+
+            c_register[1][2] += a_frag_vec[k % 2].y * b_frag_vec[k % 2].z;
+
+            c_register[1][3] += a_frag_vec[k % 2].y * b_frag_vec[k % 2].w;
+
+            // 第三行
+            
+            c_register[2][0] += a_frag_vec[k % 2].z * b_frag_vec[k % 2].x;
+
+            c_register[2][1] += a_frag_vec[k % 2].z * b_frag_vec[k % 2].y;
+
+            c_register[2][2] += a_frag_vec[k % 2].z * b_frag_vec[k % 2].z;
+
+            c_register[2][3] += a_frag_vec[k % 2].z * b_frag_vec[k % 2].w;
+
+            // 第四行
+
+            c_register[3][0] += a_frag_vec[k % 2].w * b_frag_vec[k % 2].x;
+
+            c_register[3][1] += a_frag_vec[k % 2].w * b_frag_vec[k % 2].y;
+
+            c_register[3][2] += a_frag_vec[k % 2].w * b_frag_vec[k % 2].z;
+
+            c_register[3][3] += a_frag_vec[k % 2].w * b_frag_vec[k % 2].w;
+              
+            
         }
 
 
         __syncthreads();
+
+        buf_idx = next_buf;
+
+        a_frag_vec[0] = FLOAT4(As[buf_idx][0][c_thread_y * 4]);
+        
+        b_frag_vec[0] = FLOAT4(Bs[buf_idx][0][c_thread_x * 4]);
     }
 
 
@@ -222,27 +303,22 @@ __global__ void block_tiling_gemm(
     // ========================================================
     // 写回 Global Memory
     // ========================================================
+
     for (int i = 0; i < TM; ++i)
     {
         const int row =
             blockIdx.y * BM +
-            c_thread_y +
-            i * C_THREAD_Y;
+            c_thread_y * 4 + i;
 
+        const int col =
+            blockIdx.x * BN +
+            c_thread_x * 4;
 
-        for (int j = 0; j < TN; ++j)
+        float4 c_vec = make_float4(c_register[i][0], c_register[i][1], 
+                                    c_register[i][2], c_register[i][3]);
+        if (row < M && col < N)
         {
-            const int col =
-                blockIdx.x * BN +
-                c_thread_x +
-                j * C_THREAD_X;
-
-
-            if (row < M && col < N)
-            {
-                C[row * N + col] =
-                    c_register[i][j];
-            }
+            __stcg(reinterpret_cast<float4*>(&C[row * N + col]), c_vec);
         }
     }
 }
@@ -343,14 +419,11 @@ int main()
     // -------------------------------
     // Kernel configuration
     // -------------------------------
-    // int minGridSize, blockSize;
-    // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, block_tiling_gemm, 0, 0);
-    // printf("Optimal block size: %d\n", blockSize);
-
     constexpr int BM = 64;
     constexpr int BN = 64;
-    constexpr int BK = 32; // RTX 2060 每个 SM 48KB shared memory，128x16x4B=8KB，一个 block 2个 tiling 16KB，共享内存可以容纳 3 个block
+    constexpr int BK = 32; // RTX 2060 每个 SM 48KB shared memory，64x16x4B=4KB，一个 block 2个 tiling 8KB，共享内存可以容纳 4 个block
 
+    
     constexpr int BLOCK_SIZE = 256; // RTX 2060 每个 SM 4个 block，每个 block 8个 warp
 
 
@@ -365,7 +438,7 @@ int main()
     // -------------------------------
     // Warmup
     // -------------------------------
-    block_tiling_gemm<
+    double_buffer_gemm<
         BM,
         BN,
         BK,
@@ -375,8 +448,8 @@ int main()
             d_B,
             d_C,
             M,
-            K,
-            N);
+            N,
+            K);
 
 
     CUDA_CHECK(cudaGetLastError());
@@ -398,7 +471,7 @@ int main()
     CUDA_CHECK(cudaEventRecord(start));
 
 
-    block_tiling_gemm<
+    double_buffer_gemm<
         BM,
         BN,
         BK,
@@ -408,8 +481,8 @@ int main()
             d_B,
             d_C,
             M,
-            K,
-            N);
+            N,
+            K);
 
 
     CUDA_CHECK(cudaGetLastError());

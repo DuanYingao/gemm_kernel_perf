@@ -50,7 +50,7 @@ template <
     int TM,
     int TN
 >
-__global__ void thread_tiling_gemm(
+__global__ void warp_tiling_gemm(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
@@ -63,14 +63,33 @@ __global__ void thread_tiling_gemm(
     __shared__ float Bs[BK][BN];
 
 
-    const int thread_row = (threadIdx.x / (BN / TN)) * TM;
-    const int thread_col = (threadIdx.x % (BN / TN)) * TN;
+    const int tid = threadIdx.x;
+
+    int warp_id = tid >> 5;            // tid / 32
+    int lane_id = tid & 31;           // tid % 32
+
+    // warp 在 Block 中的位置（4×2 排列）
+    int warp_row = warp_id >> 1;      // M 方向：0~3
+    int warp_col = warp_id & 1;       // N 方向：0~1
+
+    // lane 在 warp 内的位置（4×8 排列，行主序）
+    int lane_row = lane_id >> 3;      // M 方向：0~3
+    int lane_col = lane_id & 7;       // N 方向：0~7
+
+    // 线程负责的 TM×TN 子块在 Block Tile 中的起始行列
+    int thread_row = (warp_row * 4 + lane_row) * TM;  // = (warp_row*4 + lane_row) * 8
+    int thread_col = (warp_col * 8 + lane_col) * TN;  // = (warp_col*8 + lane_col) * 8
+
+    //const int thread_row = (tid / (BN / TN)) * TM;
+    //const int thread_col = (tid % (BN / TN)) * TN;
 
 
     // Register tile
     float a_register[TM];
     float b_register[TN];
     float c_register[TM][TN] = {0.0f};
+
+    int by = blockIdx.y, bx = blockIdx.x;
 
 
     // ========================================================
@@ -90,6 +109,9 @@ __global__ void thread_tiling_gemm(
     // 每个 thread:
     // 
     // ========================================================
+    // 当前 block 对应 C 中的位置
+    const int block_row = blockIdx.y * BM;
+    const int block_col = blockIdx.x * BN;
 
 
     // -------- Load A tile mapping --------
@@ -97,18 +119,18 @@ __global__ void thread_tiling_gemm(
     constexpr int A_LOAD_Y = BLOCK_SIZE / A_LOAD_X;
 
 
-    const int a_thread_x = threadIdx.x % A_LOAD_X;
-    const int a_thread_y = threadIdx.x / A_LOAD_X;
+    const int a_thread_x = tid % A_LOAD_X;
+    const int a_thread_y = tid / A_LOAD_X;
 
 
 
     // -------- Load B tile mapping --------
-    constexpr int B_LOAD_X = 32;
+    constexpr int B_LOAD_X = 8;
     constexpr int B_LOAD_Y = BLOCK_SIZE / B_LOAD_X;
 
 
-    const int b_thread_x = threadIdx.x % B_LOAD_X;
-    const int b_thread_y = threadIdx.x / B_LOAD_X;
+    const int b_thread_x = tid % B_LOAD_X;
+    const int b_thread_y = tid / B_LOAD_X;
 
 
 
@@ -125,7 +147,7 @@ __global__ void thread_tiling_gemm(
              i < BM;
              i += A_LOAD_Y)
         {
-            const int row = blockIdx.y * BM + i;
+            const int row = block_row + i;
             const int col = k0 + a_thread_x;
 
 
@@ -140,24 +162,20 @@ __global__ void thread_tiling_gemm(
         // ----------------------------------------------------
         // 加载 B tile
         // ----------------------------------------------------
-        for (int i = b_thread_y;
-             i < BK;
-             i += B_LOAD_Y)
+        for (int j = b_thread_x;
+             j < BN;
+             j += B_LOAD_X)
         {
-            for(int j = b_thread_x;
-                j < BN;
-                j += B_LOAD_X)
-            {
-                const int row = k0 + i;
-                const int col = blockIdx.x * BN + j;
+            const int row = k0 + b_thread_y;
+            const int col = block_col + j;
 
-                Bs[i][j] =
-                    (row < K && col < N)
-                        ? B[row * N + col]
-                        : 0.0f;
-            }
 
+            Bs[b_thread_y][j] =
+                (row < K && col < N)
+                    ? B[row * N + col]
+                    : 0.0f;
         }
+
 
 
         __syncthreads();
@@ -199,7 +217,7 @@ __global__ void thread_tiling_gemm(
     // ========================================================
     for (int i = 0; i < TM; i++)
         for (int j = 0; j < TN; j++)
-            C[(blockIdx.y * BM + thread_row + i) * N + blockIdx.x * BN + thread_col + j] = c_register[i][j];
+            C[(by * BM + thread_row + i) * N + bx * BN + thread_col + j] = c_register[i][j];
 }
 
 
@@ -322,7 +340,7 @@ int main()
     // -------------------------------
     // Warmup
     // -------------------------------
-    thread_tiling_gemm<
+    warp_tiling_gemm<
         BM,
         BN,
         BK,
@@ -357,7 +375,7 @@ int main()
     CUDA_CHECK(cudaEventRecord(start));
 
 
-    thread_tiling_gemm<
+    warp_tiling_gemm<
         BM,
         BN,
         BK,
