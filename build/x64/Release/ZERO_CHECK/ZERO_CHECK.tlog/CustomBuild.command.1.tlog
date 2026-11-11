@@ -1,0 +1,10 @@
+^D:\AI_INFRA\GEMM_KERNEL_PERF\BUILD\CMAKEFILES\A38E5AAADC013E193CCF416B8D545495\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/AI_Infra/gemm_kernel_perf -BD:/AI_Infra/gemm_kernel_perf/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/AI_Infra/gemm_kernel_perf/build/gemm_kernel.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

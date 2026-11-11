@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"D:/AI_Infra/gemm_kernel_perf/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

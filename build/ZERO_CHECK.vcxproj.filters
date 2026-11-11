@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\AI_Infra\gemm_kernel_perf\build\CMakeFiles\a38e5aaadc013e193ccf416b8d545495\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{BD564173-60CB-3BFD-BCFC-A2808FCDF57C}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

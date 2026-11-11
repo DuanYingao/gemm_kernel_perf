@@ -1,0 +1,3 @@
+D:/AI_Infra/gemm_kernel_perf/build/CMakeFiles/wmma_share.dir
+D:/AI_Infra/gemm_kernel_perf/build/CMakeFiles/ALL_BUILD.dir
+D:/AI_Infra/gemm_kernel_perf/build/CMakeFiles/ZERO_CHECK.dir

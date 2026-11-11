@@ -46,31 +46,19 @@ template <
     int BM,
     int BN,
     int BK,
-    int BLOCK_SIZE,
-    int TM,
-    int TN
+    int BLOCK_SIZE
 >
-__global__ void thread_tiling_gemm(
+__global__ void block_tiling_gemm(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
     const int M,
-    const int K,
-    const int N)
+    const int N,
+    const int K)
 {
     // Shared Memory Tile
     __shared__ float As[BM][BK]; 
     __shared__ float Bs[BK][BN];
-
-
-    const int thread_row = (threadIdx.x / (BN / TN)) * TM;
-    const int thread_col = (threadIdx.x % (BN / TN)) * TN;
-
-
-    // Register tile
-    float a_register[TM];
-    float b_register[TN];
-    float c_register[TM][TN] = {0.0f};
 
 
     // ========================================================
@@ -79,10 +67,10 @@ __global__ void thread_tiling_gemm(
     // 一个 block 256 threads
     //
     // A tile loading:
-    // 32 x 8 threads
+    // 16 x 16 threads
     //
     // B tile loading:
-    // 8 x 32 threads
+    // 16 x 16 threads
     //
     // C compute:
     // 16 x 16 threads
@@ -112,6 +100,35 @@ __global__ void thread_tiling_gemm(
 
 
 
+    // -------- Compute C mapping --------
+    constexpr int C_THREAD_X = 16;
+    constexpr int C_THREAD_Y = BLOCK_SIZE / C_THREAD_X;
+
+
+    const int c_thread_x = threadIdx.x % C_THREAD_X;
+    const int c_thread_y = threadIdx.x / 16 % C_THREAD_Y;
+
+
+
+    // 每个线程负责的输出 tile
+    constexpr int TM = BM / C_THREAD_Y;
+    constexpr int TN = BN / C_THREAD_X;
+
+
+
+    // Register tile
+    float c_register[TM][TN] = {0.0f};
+
+    // ========================================================
+    // 运算过程
+    // 1.先分块,一个block负责一个C矩阵的BMxBN大小的块，一共有1024 / BM * 1024 / BN 个block，也就是Grid里的block数量，这些block并行计算，用syncthreads()同步最终结果
+    // 2.一个block沿k方向循环加载A和B的tile，并进行矩阵乘法计算
+    // 3.由于一个block只有256个线程，无法直接用所有线程同时计算整个BMxBN的块，因此需要将BMxBN的块用for循环分解
+    // 4.最外圈循环按BK的k一个个走，循环中A按一列读，B按一行读，先从N方向循环，一次循环读出256个元素，循环TN次，再从M方向下降c_thread_x的距离，再进行一次TN个行循环，重复TM次
+    //
+    // 
+    // ========================================================
+
     // ========================================================
     // K 方向循环
     // ========================================================
@@ -119,7 +136,7 @@ __global__ void thread_tiling_gemm(
     {
 
         // ----------------------------------------------------
-        // 加载 A tile
+        // 存入 A tile
         // ----------------------------------------------------
         for (int i = a_thread_y;
              i < BM;
@@ -138,7 +155,7 @@ __global__ void thread_tiling_gemm(
 
 
         // ----------------------------------------------------
-        // 加载 B tile
+        // 存入 B tile
         // ----------------------------------------------------
         for (int i = b_thread_y;
              i < BK;
@@ -160,6 +177,7 @@ __global__ void thread_tiling_gemm(
         }
 
 
+
         __syncthreads();
 
 
@@ -174,18 +192,25 @@ __global__ void thread_tiling_gemm(
         // #pragma unroll 展开加速，但寄存器代价大
         for (int k = 0; k < BK; ++k)
         {
-
-            // 从共享内存加载到寄存器
             for (int i = 0; i < TM; ++i)
-                a_register[i] = As[thread_row + i][k];
-            for (int j = 0; j < TN; ++j)
-                b_register[j] = Bs[k][thread_col + j];
+            {
+                const int row =
+                    c_thread_y +
+                    i * C_THREAD_Y;
 
-            // 寄存器上做外积
-            for (int i = 0; i < TM; i++)
-                for (int j = 0; j < TN; j++)
-                    c_register[i][j] += a_register[i] * b_register[j];
 
+                for (int j = 0; j < TN; ++j)
+                {
+                    const int col =
+                        c_thread_x +
+                        j * C_THREAD_X;
+
+                    // 读取AS时，一列32个全是lane0，全conflict
+                    c_register[i][j] +=
+                        As[row][k] * 
+                        Bs[k][col];
+                }
+            }
         }
 
 
@@ -197,9 +222,29 @@ __global__ void thread_tiling_gemm(
     // ========================================================
     // 写回 Global Memory
     // ========================================================
-    for (int i = 0; i < TM; i++)
-        for (int j = 0; j < TN; j++)
-            C[(blockIdx.y * BM + thread_row + i) * N + blockIdx.x * BN + thread_col + j] = c_register[i][j];
+    for (int i = 0; i < TM; ++i)
+    {
+        const int row =
+            blockIdx.y * BM +
+            c_thread_y +
+            i * C_THREAD_Y;
+
+
+        for (int j = 0; j < TN; ++j)
+        {
+            const int col =
+                blockIdx.x * BN +
+                c_thread_x +
+                j * C_THREAD_X;
+
+
+            if (row < M && col < N)
+            {
+                C[row * N + col] =
+                    c_register[i][j];
+            }
+        }
+    }
 }
 
 
@@ -298,18 +343,16 @@ int main()
     // -------------------------------
     // Kernel configuration
     // -------------------------------
+    // int minGridSize, blockSize;
+    // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, block_tiling_gemm, 0, 0);
+    // printf("Optimal block size: %d\n", blockSize);
+
     constexpr int BM = 64;
     constexpr int BN = 64;
-    constexpr int BK = 32; // RTX 2060 每个 SM 48KB shared memory，64x16x4B=4KB，一个 block 2个 tiling 8KB，共享内存可以容纳 4 个block
+    constexpr int BK = 32; // RTX 2060 每个 SM 48KB shared memory，128x16x4B=8KB，一个 block 2个 tiling 16KB，共享内存可以容纳 3 个block
 
-    constexpr int BLOCK_SIZE = 256;
-    
-    constexpr int C_THREAD_X = 16;
-    constexpr int C_THREAD_Y = BLOCK_SIZE / C_THREAD_X;
+    constexpr int BLOCK_SIZE = 256; // RTX 2060 每个 SM 4个 block，每个 block 8个 warp
 
-    // 每个线程负责的输出 tile
-    constexpr int TM = BM / C_THREAD_Y;
-    constexpr int TN = BN / C_THREAD_X;
 
     dim3 block(BLOCK_SIZE);
 
@@ -322,20 +365,18 @@ int main()
     // -------------------------------
     // Warmup
     // -------------------------------
-    thread_tiling_gemm<
+    block_tiling_gemm<
         BM,
         BN,
         BK,
-        BLOCK_SIZE,
-        TM,
-        TN>
+        BLOCK_SIZE>
         <<<grid, block>>>(
             d_A,
             d_B,
             d_C,
             M,
-            K,
-            N);
+            N,
+            K);
 
 
     CUDA_CHECK(cudaGetLastError());
@@ -357,20 +398,18 @@ int main()
     CUDA_CHECK(cudaEventRecord(start));
 
 
-    thread_tiling_gemm<
+    block_tiling_gemm<
         BM,
         BN,
         BK,
-        BLOCK_SIZE,
-        TM,
-        TN>
+        BLOCK_SIZE>
         <<<grid, block>>>(
             d_A,
             d_B,
             d_C,
             M,
-            K,
-            N);
+            N,
+            K);
 
 
     CUDA_CHECK(cudaGetLastError());
